@@ -11,6 +11,8 @@
 #include <NvOnnxParser.h>
 #include <cuda_runtime_api.h>
 
+using namespace nvinfer1;
+using namespace std;
 static Logger gLogger;
 
 
@@ -87,7 +89,7 @@ void TRTModule::build(string onnxPath, vector<string> inputNames, vector<string>
     assert(parser != nullptr);
 
     bool parsed = parser->parseFromFile(onnxPath.c_str(), static_cast<int>(gLogger.getReportableSeverity()));
-    assert(parsed != nullptrt);
+    assert(parsed);
 
 
     // CUDA stream used for profiling by the builder.
@@ -99,7 +101,7 @@ void TRTModule::build(string onnxPath, vector<string> inputNames, vector<string>
     mRuntime = createInferRuntime(gLogger);
     assert(mRuntime != nullptr);
 
-    mEngine = mRuntime->deserializeCudaEngine(plan->data(), plan->size(), nullptr);
+    mEngine = mRuntime->deserializeCudaEngine(plan->data(), plan->size());
     assert(mEngine != nullptr);
 
     mContext = mEngine->createExecutionContext();
@@ -132,48 +134,42 @@ void TRTModule::deserializeEngine(string engine_name, vector<string> inputNames,
     mRuntime = createInferRuntime(gLogger);
     assert(mRuntime);
     mEngine = mRuntime->deserializeCudaEngine(serializedEngine, size);
-    assert(*mEngine);
+    assert(mEngine != nullptr);
     mContext = mEngine->createExecutionContext();
-    assert(*mContext);
+    assert(mContext != nullptr);
     delete[] serializedEngine;
 
-    assert(mEngine->getNbBindings() != inputNames.size() + outputNames.size()); 
+    // TensorRT 10 replaces bindings with IO Tensors
+    assert(mEngine->getNbIOTensors() == inputNames.size() + outputNames.size()); 
 
     initialize(inputNames, outputNames);
 }
 
 void TRTModule::initialize(vector<string> inputNames, vector<string> outputNames)
 {
-    for (int i = 0; i < inputNames.size(); i++)
-    {
-        const int inputIndex = mEngine->getBindingIndex(inputNames[i].c_str());
-    }
+    int numTensors = mEngine->getNbIOTensors();
+    
+    mGpuBuffers.resize(numTensors);
+    mCpuBuffers.resize(numTensors);
 
-    for (int i = 0; i < outputNames.size(); i++)
+    for (int i = 0; i < numTensors; ++i)
     {
-        const int outputIndex = mEngine->getBindingIndex(outputNames[i].c_str());
-    }
-
-    mGpuBuffers.resize(mEngine->getNbBindings());
-    mCpuBuffers.resize(mEngine->getNbBindings());
-
-    for (size_t i = 0; i < mEngine->getNbBindings(); ++i)
-    {
-        size_t binding_size = getSizeByDim(mEngine->getBindingDimensions(i));
+        const char* tensorName = mEngine->getIOTensorName(i);
+        size_t binding_size = getSizeByDim(mEngine->getTensorShape(tensorName));
+        
         mBufferBindingSizes.push_back(binding_size);
         mBufferBindingBytes.push_back(binding_size * sizeof(float));
 
         mCpuBuffers[i] = new float[binding_size];
-
         cudaMalloc(&mGpuBuffers[i], mBufferBindingBytes[i]);
 
-        if (mEngine->bindingIsInput(i))
+        if (mEngine->getTensorIOMode(tensorName) == nvinfer1::TensorIOMode::kINPUT)
         {
-            mInputDims.push_back(mEngine->getBindingDimensions(i));
+            mInputDims.push_back(mEngine->getTensorShape(tensorName));
         }
         else
         {
-            mOutputDims.push_back(mEngine->getBindingDimensions(i));
+            mOutputDims.push_back(mEngine->getTensorShape(tensorName));
         }
     }
 
@@ -183,15 +179,18 @@ void TRTModule::initialize(vector<string> inputNames, vector<string> outputNames
 //!
 //! \brief Runs the TensorRT inference engine for this sample
 //!
-//! \details This function is the main execution function of the sample. It allocates the buffer,
-//!          sets inputs and executes the engine.
-//!
 bool TRTModule::infer()
 {
     // Memcpy from host input buffers to device input buffers
     copyInputToDeviceAsync(mCudaStream);
 
-    bool status = mContext->executeV2(mGpuBuffers.data());
+    // TensorRT 10 Execution Setup
+    for (int i = 0; i < mEngine->getNbIOTensors(); i++)
+    {
+        mContext->setTensorAddress(mEngine->getIOTensorName(i), mGpuBuffers[i]);
+    }
+
+    bool status = mContext->enqueueV3(mCudaStream);
 
     if (!status)
     {
@@ -205,17 +204,11 @@ bool TRTModule::infer()
     return true;
 }
 
-//!
-//! \brief Copy the contents of input host buffers to input device buffers asynchronously.
-//!
 void TRTModule::copyInputToDeviceAsync(const cudaStream_t& stream)
 {
     memcpyBuffers(true, false, true, stream);
 }
 
-//!
-//! \brief Copy the contents of output device buffers to output host buffers asynchronously.
-//!
 void TRTModule::copyOutputToHostAsync(const cudaStream_t& stream)
 {
     memcpyBuffers(false, true, true, stream);
@@ -223,14 +216,17 @@ void TRTModule::copyOutputToHostAsync(const cudaStream_t& stream)
 
 void TRTModule::memcpyBuffers(const bool copyInput, const bool deviceToHost, const bool async, const cudaStream_t& stream)
 {
-    for (int i = 0; i < mEngine->getNbBindings(); i++)
+    for (int i = 0; i < mEngine->getNbIOTensors(); i++)
     {
+        const char* tensorName = mEngine->getIOTensorName(i);
         void* dstPtr = deviceToHost ? mCpuBuffers[i] : mGpuBuffers[i];
         const void* srcPtr = deviceToHost ? mGpuBuffers[i] : mCpuBuffers[i];
         const size_t byteSize = mBufferBindingBytes[i];
         const cudaMemcpyKind memcpyType = deviceToHost ? cudaMemcpyDeviceToHost : cudaMemcpyHostToDevice;
 
-        if ((copyInput && mEngine->bindingIsInput(i)) || (!copyInput && !mEngine->bindingIsInput(i)))
+        bool isInput = (mEngine->getTensorIOMode(tensorName) == nvinfer1::TensorIOMode::kINPUT);
+
+        if ((copyInput && isInput) || (!copyInput && !isInput))
         {
             if (async)
             {
@@ -248,7 +244,7 @@ size_t TRTModule::getSizeByDim(const Dims& dims)
 {
     size_t size = 1;
     
-    for (size_t i = 0; i < dims.nbDims; ++i)
+    for (int i = 0; i < dims.nbDims; ++i)
     {
         if (dims.d[i] == -1)
             size *= MAX_NUM_PROMPTS;
@@ -299,10 +295,9 @@ void TRTModule::setInput(float* features, float* imagePointCoords, float* imageP
     memcpy(mCpuBuffers[3], maskInput, mBufferBindingBytes[3]);
     memcpy(mCpuBuffers[4], hasMaskInput, mBufferBindingBytes[4]);
 
-    // Setting Dynamic Input Shape in TensorRT
-    mContext->setOptimizationProfileAsync(0, mCudaStream);
-    mContext->setBindingDimensions(1, Dims3{ 1, numPoints, 2 });
-    mContext->setBindingDimensions(2, Dims2{ 1, numPoints });
+    // Setting Dynamic Input Shape in TensorRT 10
+    mContext->setInputShape(mEngine->getIOTensorName(1), Dims3{ 1, numPoints, 2 });
+    mContext->setInputShape(mEngine->getIOTensorName(2), Dims2{ 1, numPoints });
 }
 
 void TRTModule::getOutput(float* features)

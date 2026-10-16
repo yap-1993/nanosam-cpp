@@ -84,7 +84,7 @@ int main()
     //NanoSam nanosam("data/resnet18_image_encoder.engine",  "data/mobile_sam_mask_decoder.engine");
 
     // Option 2: Build the engines from onnx files
-    NanoSam nanosam("data/resnet18_image_encoder.onnx", "data/mobile_sam_mask_decoder.onnx");
+    NanoSam nanosam("/home/admin/Downloads/nanosam/resnet18_image_encoder.onnx", "/home/admin/Downloads/nanosam/mobile_sam_mask_decoder.onnx");
 
     /* 2. Segmentation examples */
     
