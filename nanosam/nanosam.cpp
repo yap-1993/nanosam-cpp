@@ -133,30 +133,43 @@ void NanoSam::upscaleMask(Mat& mask, int targetWidth, int targetHeight, int size
     mask = tempMask;
 }
 
-void NanoSam::encodeImageGpu(const Mat& cpuImage)
+void NanoSam::encodeImageGpu(const cv::cuda::GpuMat& gpuImage)
 {
-    // 1. Upload raw BGR image to GPU
-    size_t imgBytes = cpuImage.rows * cpuImage.step;
-    if (!d_rawImage) {
-        cudaMalloc((void**)&d_rawImage, imgBytes);
-    }
-    cudaMemcpyAsync(d_rawImage, cpuImage.data, imgBytes, cudaMemcpyHostToDevice, mStream);
+    // // 1. Upload raw BGR image to GPU
+    // size_t imgBytes = cpuImage.rows * cpuImage.step;
+    // if (!d_rawImage) {
+    //     cudaMalloc((void**)&d_rawImage, imgBytes);
+    // }
+    // cudaMemcpyAsync(d_rawImage, cpuImage.data, imgBytes, cudaMemcpyHostToDevice, mStream);
+    // 
+    // // 2. Preprocess directly on GPU into the Image Encoder's input buffer
+    // float* d_encoderInput = (float*)mImageEncoder->getGpuBuffer("image");
+    // launchPreprocess(d_rawImage, cpuImage.cols, cpuImage.rows, cpuImage.step,
+    //                  d_encoderInput, MODEL_INPUT_WIDTH, MODEL_INPUT_HEIGHT, mStream);
+    // 
+    // // 3. Run Encoder without downloading features to CPU
+    // mImageEncoder->inferGpuOnly();
 
-    // 2. Preprocess directly on GPU into the Image Encoder's input buffer
+    // Preprocess directly on GPU into the Image Encoder's input buffer
     float* d_encoderInput = (float*)mImageEncoder->getGpuBuffer("image");
-    launchPreprocess(d_rawImage, cpuImage.cols, cpuImage.rows, cpuImage.step,
+    
+    // Use gpuImage.data to get the raw device pointer
+    launchPreprocess((const uint8_t*)gpuImage.data, 
+                     gpuImage.cols, gpuImage.rows, gpuImage.step,
                      d_encoderInput, MODEL_INPUT_WIDTH, MODEL_INPUT_HEIGHT, mStream);
 
-    // 3. Run Encoder without downloading features to CPU
+    // Run Encoder without downloading features to CPU
     mImageEncoder->inferGpuOnly();
 }
 
-cv::Mat NanoSam::predictGpu(const cv::Mat& image, const std::vector<cv::Point>& points, const std::vector<float>& labels)
+cv::Mat NanoSam::predictGpu(const cv::cuda::GpuMat& image, const std::vector<cv::Point>& points, const std::vector<float>& labels)
 {
     // FIX: Safe Device-to-Device copy avoids double-free memory crashes
     void* d_enc_emb = mImageEncoder->getGpuBuffer("image_embeddings");
     void* d_dec_emb = mMaskDecoder->getGpuBuffer("image_embeddings");
-    cudaMemcpyAsync(d_dec_emb, d_enc_emb, 256 * 64 * 64 * sizeof(float), cudaMemcpyDeviceToDevice, mStream);
+    constexpr int mem_dim = 1048576;// 256*64*64
+    cudaMemcpyAsync(d_dec_emb, d_enc_emb, mem_dim * sizeof(float), cudaMemcpyDeviceToDevice, mStream);
+    // mMaskDecoder->setTensorAddress("image_embeddings", d_enc_emb);
 
     // Scale points and copy coordinates to GPU
     float scale = (float)MODEL_INPUT_WIDTH / std::max(image.cols, image.rows);

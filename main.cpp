@@ -70,14 +70,17 @@ void segmentWithPoint(NanoSam& nanosam, string imagePath, string outputPath, Poi
 {
     auto image = imread(imagePath);
     
+    cv::cuda::GpuMat gpuImage;
+    gpuImage.upload(image);
+
     // 1 : Foreground
     vector<float> labels = { 1.0f }; 
 
     // Mask returns as a CV_32FC1 matrix of raw float logits
     auto start = std::chrono::high_resolution_clock::now();
     //auto mask = nanosam.predict(image, { promptPoint }, labels);
-    nanosam.encodeImageGpu(image);
-    auto mask = nanosam.predictGpu(image, { promptPoint }, labels);
+    nanosam.encodeImageGpu(gpuImage);
+    auto mask = nanosam.predictGpu(gpuImage, { promptPoint }, labels);
     auto end = std::chrono::high_resolution_clock::now();
     
     if (predictDurationMs != nullptr)
@@ -96,22 +99,33 @@ int main()
     /* 1. Load engine examples */
 
     // Option 1: Load the engines
-    // NanoSam nanosam("/home/admin/Downloads/nanosam/resnet18_image_encoder_fp16_opt_5_avg_100.engine",  "/home/admin/Downloads/nanosam/mobile_sam_mask_decoder.engine");
-    NanoSam nanosam("/home/admin/Downloads/nanosam/resnet18_image_encoder_int8.engine",  "/home/admin/Downloads/nanosam/mobile_sam_mask_decoder.engine");
+    NanoSam nanosam("/home/admin/Downloads/nanosam/resnet18_image_encoder_fp16_opt_5_avg_100.engine",  "/home/admin/Downloads/nanosam/mobile_sam_mask_decoder.engine");
+    // NanoSam nanosam("/home/admin/Downloads/nanosam/resnet18_image_encoder_int8.engine",  "/home/admin/Downloads/nanosam/mobile_sam_mask_decoder.engine");
 
     // Option 2: Build the engines from onnx files
     // NanoSam nanosam("/home/admin/Downloads/nanosam/resnet18_image_encoder.onnx", "/home/admin/Downloads/nanosam/mobile_sam_mask_decoder.onnx");
     
-    const int num_iterations = 2;
+    const int num_iterations = 100;
     std::vector<double> predict_latencies;
     predict_latencies.reserve(num_iterations);
 
     double current_predict_ms = 0.0;
 
     // 1. Warm-up run (ignores disk I/O and GPU compilation overhead)
-    std::cout << "Warming up..." << std::endl;
-    segmentWithPoint(nanosam, "assets/dog.jpg", "assets/dog_mask.jpg", Point(1300, 900), &current_predict_ms);
-    std::cout << "Warm-up predict time: " << current_predict_ms << " ms\n" << std::endl;
+    // std::cout << "Warming up..." << std::endl;
+    // segmentWithPoint(nanosam, "assets/dog.jpg", "assets/dog_mask.jpg", Point(1300, 900), &current_predict_ms);
+    // std::cout << "Warm-up predict time: " << current_predict_ms << " ms\n" << std::endl;
+    std::cout << "Warming up TensorRT engines..." << std::endl;
+    
+    // 2. Create a dummy blank image directly on the GPU
+    cv::cuda::GpuMat dummyImage(1080, 1920, CV_8UC3, cv::Scalar(0, 0, 0));
+    std::vector<float> dummyLabels = { 1.0f };
+    
+    // 3. Run the full pipeline once during boot
+    nanosam.encodeImageGpu(dummyImage);
+    nanosam.predictGpu(dummyImage, { Point(0, 0) }, dummyLabels);
+    
+    std::cout << "Warm-up complete. Ready for tracking." << std::endl;
 
     // 2. Benchmark loop
     std::cout << "Benchmarking predict over " << num_iterations << " iterations..." << std::endl;

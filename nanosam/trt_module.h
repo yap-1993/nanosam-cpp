@@ -32,6 +32,7 @@ public:
     
     void setInputShape(const std::string& tensorName, nvinfer1::Dims dims);
 
+    void setTensorAddress(const std::string& tensorName, void* gpuAddress);
 
 
 private:
@@ -49,6 +50,7 @@ private:
     void copyInputToDeviceAsync(const cudaStream_t& stream = 0);
 
     void copyOutputToHostAsync(const cudaStream_t& stream = 0);
+
 
     vector<Dims> mInputDims;            //!< The dimensions of the input to the network.
     vector<Dims> mOutputDims;           //!< The dimensions of the output to the network.

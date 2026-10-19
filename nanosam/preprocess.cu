@@ -54,3 +54,51 @@ void launchPreprocess(const uint8_t* d_src, int srcW, int srcH, int srcStep,
     preprocess_kernel<<<grid, block, 0, stream>>>(
         d_src, srcW, srcH, srcStep, d_dst, dstW, dstH, scale);
 }
+
+__global__ void upscale_mask_kernel(
+    const float* __restrict__ src, int srcW, int srcH,
+    float* __restrict__ dst, int dstW, int dstH)
+{
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x >= dstW || y >= dstH) return;
+
+    // Calculate source coordinates
+    float srcX = x * ((float)srcW / dstW);
+    float srcY = y * ((float)srcH / dstH);
+
+    // Get integer coordinates for the 4 neighbors
+    int x1 = (int)srcX;
+    int y1 = (int)srcY;
+    int x2 = min(x1 + 1, srcW - 1);
+    int y2 = min(y1 + 1, srcH - 1);
+
+    // Calculate interpolation weights
+    float wx = srcX - x1;
+    float wy = srcY - y1;
+
+    // Read the 4 neighboring values from the source mask
+    float v00 = src[y1 * srcW + x1];
+    float v10 = src[y1 * srcW + x2];
+    float v01 = src[y2 * srcW + x1];
+    float v11 = src[y2 * srcW + x2];
+
+    // Bilinear interpolation formula
+    float val = (1.0f - wx) * (1.0f - wy) * v00 +
+                wx * (1.0f - wy) * v10 +
+                (1.0f - wx) * wy * v01 +
+                wx * wy * v11;
+
+    dst[y * dstW + x] = val;
+}
+
+void launchUpscaleMask(const float* d_src, int srcW, int srcH,
+                       float* d_dst, int dstW, int dstH, cudaStream_t stream)
+{
+    dim3 block(16, 16);
+    dim3 grid((dstW + block.x - 1) / block.x, (dstH + block.y - 1) / block.y);
+
+    upscale_mask_kernel<<<grid, block, 0, stream>>>(
+        d_src, srcW, srcH, d_dst, dstW, dstH);
+}

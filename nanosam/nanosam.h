@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <opencv2/cudawarping.hpp>
 #include "trt_module.h"
 #include "preprocess.cuh"
 
@@ -14,8 +15,8 @@ public:
     ~NanoSam();
 
     Mat predict(Mat& image, vector<Point> points, vector<float> labels);
-    Mat predictGpu(const Mat& image, const std::vector<cv::Point>& points, const std::vector<float>& labels);
-    void encodeImageGpu(const Mat& cpuImage);
+    Mat predictGpu(const cv::cuda::GpuMat& image, const std::vector<cv::Point>& points, const std::vector<float>& labels);
+    void encodeImageGpu(const cv::cuda::GpuMat& gpuImage);
 
 private:
 
@@ -30,6 +31,7 @@ private:
     TRTModule* mMaskDecoder;
 
     void upscaleMask(Mat& mask, int targetWidth, int targetHeight, int size = 256);
+    void upscaleMaskGPU(cv::cuda::GpuMat& mask, int targetWidth, int targetHeight, int size = 256);
     Mat resizeImage(Mat& img, int modelWidth, int modelHeight);
     void prepareDecoderInput(vector<Point>& points, float* pointData, int numPoints, int imageWidth, int imageHeight);
     

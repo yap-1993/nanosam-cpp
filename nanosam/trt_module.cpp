@@ -365,3 +365,8 @@ void TRTModule::setInputShape(const std::string& tensorName, nvinfer1::Dims dims
     mContext->setInputShape(tensorName.c_str(), dims);
 }
 
+void TRTModule::setTensorAddress(const std::string& tensorName, void* gpuAddress)
+{
+    mContext->setTensorAddress(tensorName.c_str(), gpuAddress);
+}
+
