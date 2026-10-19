@@ -57,6 +57,7 @@ add_executable(${PROJECT_NAME}
     main.cpp
     nanosam/nanosam.cpp
     nanosam/trt_module.cpp
+    nanosam/preprocess.cu  # Added the CUDA kernel file here
 )
 
 # ---- 4) Link ----

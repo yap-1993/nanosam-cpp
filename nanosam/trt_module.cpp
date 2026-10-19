@@ -340,3 +340,28 @@ void TRTModule::getOutput(float* iouPrediction, float* lowResolutionMasks)
     memcpy(lowResolutionMasks, mCpuBuffers[id_masks], mBufferBindingBytes[id_masks]);
     memcpy(iouPrediction, mCpuBuffers[id_iou], mBufferBindingBytes[id_iou]);
 }
+
+void* TRTModule::getGpuBuffer(const std::string& tensorName)
+{
+    for (int i = 0; i < mEngine->getNbIOTensors(); i++) {
+        if (mEngine->getIOTensorName(i) == tensorName) {
+            return mGpuBuffers[i];
+        }
+    }
+    return nullptr;
+}
+
+// Executes inference directly on GPU without host <-> device memcpys
+bool TRTModule::inferGpuOnly()
+{
+    for (int i = 0; i < mEngine->getNbIOTensors(); i++) {
+        mContext->setTensorAddress(mEngine->getIOTensorName(i), mGpuBuffers[i]);
+    }
+    return mContext->enqueueV3(mCudaStream);
+}
+
+void TRTModule::setInputShape(const std::string& tensorName, nvinfer1::Dims dims)
+{
+    mContext->setInputShape(tensorName.c_str(), dims);
+}
+

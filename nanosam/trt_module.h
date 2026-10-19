@@ -26,6 +26,14 @@ public:
 
     ~TRTModule();
 
+    void* getGpuBuffer(const std::string& tensorName);
+
+    bool inferGpuOnly();
+    
+    void setInputShape(const std::string& tensorName, nvinfer1::Dims dims);
+
+
+
 private:
 
     void build(string onnxPath, vector<string> inputNames, vector<string> outputNames, bool isDynamicShape = false, bool isFP16 = false);
@@ -41,7 +49,6 @@ private:
     void copyInputToDeviceAsync(const cudaStream_t& stream = 0);
 
     void copyOutputToHostAsync(const cudaStream_t& stream = 0);
-
 
     vector<Dims> mInputDims;            //!< The dimensions of the input to the network.
     vector<Dims> mOutputDims;           //!< The dimensions of the output to the network.

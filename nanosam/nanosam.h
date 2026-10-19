@@ -2,6 +2,7 @@
 
 #include <string>
 #include "trt_module.h"
+#include "preprocess.cuh"
 
 class NanoSam
 {
@@ -13,6 +14,8 @@ public:
     ~NanoSam();
 
     Mat predict(Mat& image, vector<Point> points, vector<float> labels);
+    Mat predictGpu(const Mat& image, const std::vector<cv::Point>& points, const std::vector<float>& labels);
+    void encodeImageGpu(const Mat& cpuImage);
 
 private:
 
@@ -29,6 +32,9 @@ private:
     void upscaleMask(Mat& mask, int targetWidth, int targetHeight, int size = 256);
     Mat resizeImage(Mat& img, int modelWidth, int modelHeight);
     void prepareDecoderInput(vector<Point>& points, float* pointData, int numPoints, int imageWidth, int imageHeight);
+    
+    uint8_t* d_rawImage = nullptr;
+    cudaStream_t mStream = nullptr;
 
 };
 

@@ -75,7 +75,9 @@ void segmentWithPoint(NanoSam& nanosam, string imagePath, string outputPath, Poi
 
     // Mask returns as a CV_32FC1 matrix of raw float logits
     auto start = std::chrono::high_resolution_clock::now();
-    auto mask = nanosam.predict(image, { promptPoint }, labels);
+    //auto mask = nanosam.predict(image, { promptPoint }, labels);
+    nanosam.encodeImageGpu(image);
+    auto mask = nanosam.predictGpu(image, { promptPoint }, labels);
     auto end = std::chrono::high_resolution_clock::now();
     
     if (predictDurationMs != nullptr)
@@ -94,7 +96,8 @@ int main()
     /* 1. Load engine examples */
 
     // Option 1: Load the engines
-    NanoSam nanosam("/home/admin/Downloads/nanosam/sam_hgv2_b1_ln_nonorm_image_encoder.engine",  "/home/admin/Downloads/nanosam/mobile_sam_mask_decoder.engine");
+    // NanoSam nanosam("/home/admin/Downloads/nanosam/resnet18_image_encoder_fp16_opt_5_avg_100.engine",  "/home/admin/Downloads/nanosam/mobile_sam_mask_decoder.engine");
+    NanoSam nanosam("/home/admin/Downloads/nanosam/resnet18_image_encoder_int8.engine",  "/home/admin/Downloads/nanosam/mobile_sam_mask_decoder.engine");
 
     // Option 2: Build the engines from onnx files
     // NanoSam nanosam("/home/admin/Downloads/nanosam/resnet18_image_encoder.onnx", "/home/admin/Downloads/nanosam/mobile_sam_mask_decoder.onnx");

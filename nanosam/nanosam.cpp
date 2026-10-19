@@ -19,6 +19,13 @@ NanoSam::NanoSam(string encoderPath, string decoderPath)
     mHasMaskInput = new float;
     mIouPrediction = new float[NUM_LABELS];
     mLowResMasks = new float[NUM_LABELS * HIDDEN_DIM * HIDDEN_DIM];
+
+    // Pre-allocate max prompt memory on GPU (e.g. 10 points)
+    void* d_coords = mMaskDecoder->getGpuBuffer("point_coords");
+    void* d_labels = mMaskDecoder->getGpuBuffer("point_labels");
+    
+    // Add stream creation
+    cudaStreamCreate(&mStream);
 }
 
 // Deconstructor
@@ -31,6 +38,9 @@ NanoSam::~NanoSam()
 
     if (mImageEncoder)  delete mImageEncoder;
     if (mMaskDecoder)   delete mMaskDecoder;
+    
+    if (d_rawImage) cudaFree(d_rawImage);
+    if (mStream) cudaStreamDestroy(mStream);
 }
 
 // Perform inference using NanoSam models
@@ -121,4 +131,61 @@ void NanoSam::upscaleMask(Mat& mask, int targetWidth, int targetHeight, int size
     Mat tempMask;
     cv::resize(mask(Rect(0, 0, limX, limY)), tempMask, Size(targetWidth, targetHeight));
     mask = tempMask;
+}
+
+void NanoSam::encodeImageGpu(const Mat& cpuImage)
+{
+    // 1. Upload raw BGR image to GPU
+    size_t imgBytes = cpuImage.rows * cpuImage.step;
+    if (!d_rawImage) {
+        cudaMalloc((void**)&d_rawImage, imgBytes);
+    }
+    cudaMemcpyAsync(d_rawImage, cpuImage.data, imgBytes, cudaMemcpyHostToDevice, mStream);
+
+    // 2. Preprocess directly on GPU into the Image Encoder's input buffer
+    float* d_encoderInput = (float*)mImageEncoder->getGpuBuffer("image");
+    launchPreprocess(d_rawImage, cpuImage.cols, cpuImage.rows, cpuImage.step,
+                     d_encoderInput, MODEL_INPUT_WIDTH, MODEL_INPUT_HEIGHT, mStream);
+
+    // 3. Run Encoder without downloading features to CPU
+    mImageEncoder->inferGpuOnly();
+}
+
+cv::Mat NanoSam::predictGpu(const cv::Mat& image, const std::vector<cv::Point>& points, const std::vector<float>& labels)
+{
+    // FIX: Safe Device-to-Device copy avoids double-free memory crashes
+    void* d_enc_emb = mImageEncoder->getGpuBuffer("image_embeddings");
+    void* d_dec_emb = mMaskDecoder->getGpuBuffer("image_embeddings");
+    cudaMemcpyAsync(d_dec_emb, d_enc_emb, 256 * 64 * 64 * sizeof(float), cudaMemcpyDeviceToDevice, mStream);
+
+    // Scale points and copy coordinates to GPU
+    float scale = (float)MODEL_INPUT_WIDTH / std::max(image.cols, image.rows);
+    std::vector<float> coords(points.size() * 2);
+    for (size_t i = 0; i < points.size(); ++i) {
+        coords[i * 2]     = (float)points[i].x * scale;
+        coords[i * 2 + 1] = (float)points[i].y * scale;
+    }
+
+    void* d_coords = mMaskDecoder->getGpuBuffer("point_coords");
+    void* d_labels = mMaskDecoder->getGpuBuffer("point_labels");
+
+    cudaMemcpyAsync(d_coords, coords.data(), sizeof(float) * coords.size(), cudaMemcpyHostToDevice, mStream);
+    cudaMemcpyAsync(d_labels, labels.data(), sizeof(float) * labels.size(), cudaMemcpyHostToDevice, mStream);
+
+    // FIX: Use explicit nvinfer1 namespace for dynamic shapes
+    mMaskDecoder->setInputShape("point_coords", nvinfer1::Dims3{ 1, (int)points.size(), 2 });
+    mMaskDecoder->setInputShape("point_labels", nvinfer1::Dims2{ 1, (int)points.size() });
+
+    // Run Decoder
+    mMaskDecoder->inferGpuOnly();
+
+    // Copy only the final low-res mask back to CPU (or upscale on GPU)
+    void* d_masks = mMaskDecoder->getGpuBuffer("low_res_masks");
+    cv::Mat lowResMask(HIDDEN_DIM, HIDDEN_DIM, CV_32FC1);
+    cudaMemcpyAsync(lowResMask.data, d_masks, sizeof(float) * HIDDEN_DIM * HIDDEN_DIM, cudaMemcpyDeviceToHost, mStream);
+    cudaStreamSynchronize(mStream);
+
+    // Upscale to original size
+    upscaleMask(lowResMask, image.cols, image.rows);
+    return lowResMask;
 }
