@@ -89,6 +89,8 @@ void segmentWithPoint(NanoSam& nanosam, string imagePath, string outputPath, Poi
     }
     
     // Pass the proper 8-bit mask to overlay
+    // Mat mask;
+    // maskGpu.download(mask);
     overlay(image, mask);
     
     imwrite(outputPath, image);

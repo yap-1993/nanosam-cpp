@@ -27,11 +27,13 @@ private:
     float* mIouPrediction;
     float* mLowResMasks;
 
+    cv::Mat mLowResMask;
+
     TRTModule* mImageEncoder;
     TRTModule* mMaskDecoder;
 
     void upscaleMask(Mat& mask, int targetWidth, int targetHeight, int size = 256);
-    void upscaleMaskGPU(cv::cuda::GpuMat& mask, int targetWidth, int targetHeight, int size = 256);
+    void upscaleMaskGpu(cv::cuda::GpuMat& mask, int targetWidth, int targetHeight, int size = 256);
     Mat resizeImage(Mat& img, int modelWidth, int modelHeight);
     void prepareDecoderInput(vector<Point>& points, float* pointData, int numPoints, int imageWidth, int imageHeight);
     
