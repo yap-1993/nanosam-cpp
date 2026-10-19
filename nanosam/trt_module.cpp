@@ -58,8 +58,7 @@ void TRTModule::build(string onnxPath, vector<string> inputNames, vector<string>
     auto builder = createInferBuilder(gLogger);
     assert(builder != nullptr);
 
-    const auto explicitBatch = 1U << static_cast<uint32_t>(NetworkDefinitionCreationFlag::kEXPLICIT_BATCH);
-    INetworkDefinition* network = builder->createNetworkV2(explicitBatch);
+    INetworkDefinition* network = builder->createNetworkV2(0);
     assert(network != nullptr);
 
     IBuilderConfig* config = builder->createBuilderConfig();
@@ -257,56 +256,87 @@ size_t TRTModule::getSizeByDim(const Dims& dims)
 
 void TRTModule::setInput(Mat& image)
 {
-    const int inputH = mInputDims[0].d[2];
-    const int inputW = mInputDims[0].d[3];
-    
-    int i = 0;
-    for (int row = 0; row < image.rows; ++row)
-    {
-        uchar* uc_pixel = image.data + row * image.step;
-        for (int col = 0; col < image.cols; ++col)
-        {
-            mCpuBuffers[0][i] = ((float)uc_pixel[2] / 255.0f - 0.485f) / 0.229f;
-            mCpuBuffers[0][i + image.rows * image.cols] = ((float)uc_pixel[1] / 255.0f - 0.456f) / 0.224f;
-            mCpuBuffers[0][i + 2 * image.rows * image.cols] = ((float)uc_pixel[0] / 255.0f - 0.406f) / 0.225f;
-            uc_pixel += 3;
-            ++i;
+    int idx = 0;
+    for (int i = 0; i < mEngine->getNbIOTensors(); i++) {
+        if (string(mEngine->getIOTensorName(i)) == "image") { 
+            idx = i; 
+            break; 
         }
     }
+
+    int H = image.rows;
+    int W = image.cols;
+    int channelSize = H * W;
+
+    // 1. Split BGR channels (bgr[0]=B, bgr[1]=G, bgr[2]=R)
+    std::vector<cv::Mat> bgr;
+    cv::split(image, bgr);
+
+    // 2. Wrap destination buffers directly to avoid copying memory
+    // Layout expected by ResNet encoder: NCHW (R, G, B)
+    cv::Mat outR(H, W, CV_32FC1, mCpuBuffers[idx]);
+    cv::Mat outG(H, W, CV_32FC1, mCpuBuffers[idx] + channelSize);
+    cv::Mat outB(H, W, CV_32FC1, mCpuBuffers[idx] + 2 * channelSize);
+
+    // 3. Exact ImageNet formula: (pixel / 255.0 - mean) / std
+    // Rewritten as: pixel * (1.0 / (255.0 * std)) - (mean / std)
+    // convertTo utilizes ARM NEON vectorized instructions on Jetson Orin (~1-2 ms)
+    bgr[2].convertTo(outR, CV_32FC1, 1.0f / (255.0f * 0.229f), -0.485f / 0.229f); // R
+    bgr[1].convertTo(outG, CV_32FC1, 1.0f / (255.0f * 0.224f), -0.456f / 0.224f); // G
+    bgr[0].convertTo(outB, CV_32FC1, 1.0f / (255.0f * 0.225f), -0.406f / 0.225f); // B
 }
 
 // Set dynamic input
 void TRTModule::setInput(float* features, float* imagePointCoords, float* imagePointLabels, float* maskInput, float* hasMaskInput, int numPoints)
 {
-    delete[]  mCpuBuffers[1];
-    delete[]  mCpuBuffers[2];
-    mCpuBuffers[1] = new float[numPoints * 2];
-    mCpuBuffers[2] = new float[numPoints];
+    int id_feat = -1, id_coords = -1, id_labels = -1, id_mask = -1, id_has_mask = -1;
+    for (int i = 0; i < mEngine->getNbIOTensors(); i++) {
+        string name = mEngine->getIOTensorName(i);
+        if (name == "image_embeddings") id_feat = i;
+        else if (name == "point_coords") id_coords = i;
+        else if (name == "point_labels") id_labels = i;
+        else if (name == "mask_input") id_mask = i;
+        else if (name == "has_mask_input") id_has_mask = i;
+    }
 
-    cudaMalloc(&mGpuBuffers[1], sizeof(float) * numPoints * 2);
-    cudaMalloc(&mGpuBuffers[2], sizeof(float) * numPoints);
+    delete[] mCpuBuffers[id_coords];
+    delete[] mCpuBuffers[id_labels];
+    mCpuBuffers[id_coords] = new float[numPoints * 2];
+    mCpuBuffers[id_labels] = new float[numPoints];
 
-    mBufferBindingBytes[1] = sizeof(float) * numPoints * 2;
-    mBufferBindingBytes[2] = sizeof(float) * numPoints;
+    mBufferBindingBytes[id_coords] = sizeof(float) * numPoints * 2;
+    mBufferBindingBytes[id_labels] = sizeof(float) * numPoints;
 
-    memcpy(mCpuBuffers[0], features, mBufferBindingBytes[0]);
-    memcpy(mCpuBuffers[1], imagePointCoords, sizeof(float) * numPoints * 2);
-    memcpy(mCpuBuffers[2], imagePointLabels, sizeof(float) * numPoints);
-    memcpy(mCpuBuffers[3], maskInput, mBufferBindingBytes[3]);
-    memcpy(mCpuBuffers[4], hasMaskInput, mBufferBindingBytes[4]);
+    // Copy only the active coordinates into pre-allocated memory
+    memcpy(mCpuBuffers[id_feat], features, mBufferBindingBytes[id_feat]);
+    memcpy(mCpuBuffers[id_coords], imagePointCoords, sizeof(float) * numPoints * 2);
+    memcpy(mCpuBuffers[id_labels], imagePointLabels, sizeof(float) * numPoints);
+    memcpy(mCpuBuffers[id_mask], maskInput, mBufferBindingBytes[id_mask]);
+    memcpy(mCpuBuffers[id_has_mask], hasMaskInput, mBufferBindingBytes[id_has_mask]);
 
-    // Setting Dynamic Input Shape in TensorRT 10
-    mContext->setInputShape(mEngine->getIOTensorName(1), Dims3{ 1, numPoints, 2 });
-    mContext->setInputShape(mEngine->getIOTensorName(2), Dims2{ 1, numPoints });
+    // Update TensorRT dynamic input shape
+    mContext->setInputShape("point_coords", Dims3{ 1, numPoints, 2 });
+    mContext->setInputShape("point_labels", Dims2{ 1, numPoints });
 }
 
 void TRTModule::getOutput(float* features)
 {
-    memcpy(features, mCpuBuffers[1], mBufferBindingBytes[1]);
+    int idx = 1; // default fallback
+    for (int i = 0; i < mEngine->getNbIOTensors(); i++) {
+        if (string(mEngine->getIOTensorName(i)) == "image_embeddings") { idx = i; break; }
+    }
+    memcpy(features, mCpuBuffers[idx], mBufferBindingBytes[idx]);
 }
 
 void TRTModule::getOutput(float* iouPrediction, float* lowResolutionMasks)
 {    
-    memcpy(lowResolutionMasks, mCpuBuffers[5], mBufferBindingBytes[5]);
-    memcpy(iouPrediction, mCpuBuffers[6], mBufferBindingBytes[6]);
+    int id_iou = -1, id_masks = -1;
+    for (int i = 0; i < mEngine->getNbIOTensors(); i++) {
+        string name = mEngine->getIOTensorName(i);
+        if (name == "iou_predictions") id_iou = i;
+        else if (name == "low_res_masks") id_masks = i;
+    }
+    
+    memcpy(lowResolutionMasks, mCpuBuffers[id_masks], mBufferBindingBytes[id_masks]);
+    memcpy(iouPrediction, mCpuBuffers[id_iou], mBufferBindingBytes[id_iou]);
 }

@@ -8,7 +8,7 @@ NanoSam::NanoSam(string encoderPath, string decoderPath)
 {
     mImageEncoder = new TRTModule(encoderPath,
         { "image" },
-        { "image_embeddings" }, false, true);
+        { "image_embeddings" }, true, false);
 
     mMaskDecoder = new TRTModule(decoderPath,
         { "image_embeddings", "point_coords", "point_labels", "mask_input", "has_mask_input" },
@@ -45,7 +45,6 @@ Mat NanoSam::predict(Mat& image, vector<Point> points, vector<float> labels)
     mImageEncoder->setInput(resizedImage);
     mImageEncoder->infer();
     mImageEncoder->getOutput(mFeatures);
-
     // Preprocess decoder input
     auto pointData = new float[2 * points.size()];
     prepareDecoderInput(points, pointData, points.size(), image.cols, image.rows);
@@ -55,12 +54,11 @@ Mat NanoSam::predict(Mat& image, vector<Point> points, vector<float> labels)
     mMaskDecoder->infer();
     mMaskDecoder->getOutput(mIouPrediction, mLowResMasks);
 
-    // Postprocessing
+    // Postprocessing: Extract the best mask using the calculated pointer offset
     Mat imgMask(HIDDEN_DIM, HIDDEN_DIM, CV_32FC1, mLowResMasks);
     upscaleMask(imgMask, image.cols, image.rows);
 
     delete[] pointData;
-
     return imgMask;
 }
 
@@ -119,5 +117,8 @@ void NanoSam::upscaleMask(Mat& mask, int targetWidth, int targetHeight, int size
         limY = size;
     }
 
-    cv::resize(mask(Rect(0, 0, limX, limY)), mask, Size(targetWidth, targetHeight));
+    // FIX: Use a temporary Mat because cv::resize cannot execute in-place
+    Mat tempMask;
+    cv::resize(mask(Rect(0, 0, limX, limY)), tempMask, Size(targetWidth, targetHeight));
+    mask = tempMask;
 }

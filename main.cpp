@@ -1,5 +1,8 @@
 #include "nanosam/nanosam.h"
 #include "utils.h"
+#include <chrono>
+#include <vector>
+#include <numeric>
 
 void segmentClickedPoint(NanoSam& nanosam, string imagePath) {
 
@@ -62,17 +65,27 @@ void segmentBbox(NanoSam& nanosam, string imagePath, string outputPath, vector<P
     imwrite(outputPath, image);
 }
 
-void segmentWithPoint(NanoSam& nanosam, string imagePath, string outputPath, Point promptPoint)
+void segmentWithPoint(NanoSam& nanosam, string imagePath, string outputPath, Point promptPoint, 
+                      double* predictDurationMs = nullptr)
 {
     auto image = imread(imagePath);
     
     // 1 : Foreground
     vector<float> labels = { 1.0f }; 
 
+    // Mask returns as a CV_32FC1 matrix of raw float logits
+    auto start = std::chrono::high_resolution_clock::now();
     auto mask = nanosam.predict(image, { promptPoint }, labels);
-
+    auto end = std::chrono::high_resolution_clock::now();
+    
+    if (predictDurationMs != nullptr)
+    {
+        *predictDurationMs = std::chrono::duration<double, std::milli>(end - start).count();
+    }
+    
+    // Pass the proper 8-bit mask to overlay
     overlay(image, mask);
-
+    
     imwrite(outputPath, image);
 }
 
@@ -81,21 +94,43 @@ int main()
     /* 1. Load engine examples */
 
     // Option 1: Load the engines
-    //NanoSam nanosam("data/resnet18_image_encoder.engine",  "data/mobile_sam_mask_decoder.engine");
+    NanoSam nanosam("/home/admin/Downloads/nanosam/sam_hgv2_b1_ln_nonorm_image_encoder.engine",  "/home/admin/Downloads/nanosam/mobile_sam_mask_decoder.engine");
 
     // Option 2: Build the engines from onnx files
-    NanoSam nanosam("/home/admin/Downloads/nanosam/resnet18_image_encoder.onnx", "/home/admin/Downloads/nanosam/mobile_sam_mask_decoder.onnx");
+    // NanoSam nanosam("/home/admin/Downloads/nanosam/resnet18_image_encoder.onnx", "/home/admin/Downloads/nanosam/mobile_sam_mask_decoder.onnx");
+    
+    const int num_iterations = 2;
+    std::vector<double> predict_latencies;
+    predict_latencies.reserve(num_iterations);
 
-    /* 2. Segmentation examples */
-    
-    // Demo 1: Segment using a point
-    segmentWithPoint(nanosam, "assets/dog.jpg", "assets/dog_mask.jpg", Point(1300, 900));
-    
+    double current_predict_ms = 0.0;
+
+    // 1. Warm-up run (ignores disk I/O and GPU compilation overhead)
+    std::cout << "Warming up..." << std::endl;
+    segmentWithPoint(nanosam, "assets/dog.jpg", "assets/dog_mask.jpg", Point(1300, 900), &current_predict_ms);
+    std::cout << "Warm-up predict time: " << current_predict_ms << " ms\n" << std::endl;
+
+    // 2. Benchmark loop
+    std::cout << "Benchmarking predict over " << num_iterations << " iterations..." << std::endl;
+    for (int i = 0; i < num_iterations; ++i)
+    {
+        segmentWithPoint(nanosam, "assets/dog.jpg", "assets/dog_mask.jpg", Point(1300, 900), &current_predict_ms);
+        predict_latencies.push_back(current_predict_ms);
+        std::cout << current_predict_ms << " ";
+    }
+    std::cout << std::endl;
+
+    // 3. Compute statistics
+    double total_time = std::accumulate(predict_latencies.begin(), predict_latencies.end(), 0.0);
+    double avg_time = total_time / num_iterations;
+
+    std::cout << "\n--- NanoSam Predict Results ---" << std::endl;
+    std::cout << "Average predict time: " << avg_time << " ms" << std::endl;
     // Demo 2: Segment using a bounding box
-    segmentBbox(nanosam, "assets/dogs.jpg", "assets/dogs_mask.jpg", { Point(100, 100), Point(750, 759) });
+    //segmentBbox(nanosam, "assets/dogs.jpg", "assets/dogs_mask.jpg", { Point(100, 100), Point(750, 759) });
 
     // Demo 3: Segment the clicked object
-    segmentClickedPoint(nanosam, "assets/dogs.jpg");
+    //segmentClickedPoint(nanosam, "assets/dogs.jpg");
 
     return 0;
 }
